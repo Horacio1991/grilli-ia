@@ -1,6 +1,11 @@
 import express from 'express';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { MODEL, MAX_HISTORY_MESSAGES, MAX_MESSAGE_LENGTH } from './config.js';
 import { OUT_OF_SCOPE_MESSAGE, SYSTEM_PROMPT } from './prompt.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 function cleanPersonalDetails(text) {
   return text
@@ -20,35 +25,77 @@ export function createApp({ generateAnswer, hasApiKey = true } = {}) {
     if (!hasApiKey || !generateAnswer) {
       return res.status(503).json({ error: 'service_unavailable' });
     }
+
     const { messages } = req.body ?? {};
+
     if (!Array.isArray(messages) || messages.length < 1 || messages.length > MAX_HISTORY_MESSAGES) {
       return res.status(400).json({ error: 'invalid_request' });
     }
-    const valid = messages.every((item) => item && ['user', 'assistant'].includes(item.role)
-      && typeof item.content === 'string' && item.content.trim().length > 0
-      && item.content.length <= MAX_MESSAGE_LENGTH);
+
+    const valid = messages.every((item) =>
+      item &&
+      ['user', 'assistant'].includes(item.role) &&
+      typeof item.content === 'string' &&
+      item.content.trim().length > 0 &&
+      item.content.length <= MAX_MESSAGE_LENGTH
+    );
+
     if (!valid || messages.at(-1)?.role !== 'user') {
       return res.status(400).json({ error: 'invalid_request' });
     }
 
     try {
-      const safeMessages = messages.map(({ role, content }) => ({ role, content: cleanPersonalDetails(content) }));
-      const result = await generateAnswer({ model: MODEL, systemPrompt: SYSTEM_PROMPT, messages: safeMessages });
-      if (!result || typeof result.isEducational !== 'boolean') throw new Error('invalid_model_response');
-      if (!result.isEducational) return res.json({ answer: OUT_OF_SCOPE_MESSAGE });
-      if (typeof result.answer !== 'string' || !result.answer.trim()) throw new Error('empty_model_response');
+      const safeMessages = messages.map(({ role, content }) => ({
+        role,
+        content: cleanPersonalDetails(content)
+      }));
+
+      const result = await generateAnswer({
+        model: MODEL,
+        systemPrompt: SYSTEM_PROMPT,
+        messages: safeMessages
+      });
+
+      if (!result || typeof result.isEducational !== 'boolean') {
+        throw new Error('invalid_model_response');
+      }
+
+      if (!result.isEducational) {
+        return res.json({ answer: OUT_OF_SCOPE_MESSAGE });
+      }
+
+      if (typeof result.answer !== 'string' || !result.answer.trim()) {
+        throw new Error('empty_model_response');
+      }
+
       return res.json({ answer: result.answer.trim() });
+
     } catch (error) {
-      console.error('Gemini request failed:', error?.status || error?.name || 'unknown');
+      console.error(
+        'Gemini request failed:',
+        error?.status || error?.name || 'unknown'
+      );
+
       return res.status(502).json({ error: 'generation_failed' });
     }
+  });
+
+  // Servir el frontend compilado de React
+  const distPath = path.join(__dirname, '..', 'dist');
+  app.use(express.static(distPath));
+
+  // Cualquier ruta que no sea /api devuelve React
+  app.get(/^(?!\/api).*/, (_req, res) => {
+    res.sendFile(path.join(distPath, 'index.html'));
   });
 
   app.use((error, _req, res, _next) => {
     if (error?.type === 'entity.too.large' || error instanceof SyntaxError) {
       return res.status(400).json({ error: 'invalid_request' });
     }
+
     return res.status(500).json({ error: 'server_error' });
   });
+
   return app;
 }
